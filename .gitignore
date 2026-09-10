@@ -21,4 +21,25 @@ data/documents/*          # Ignore all raw documents, such as the large PDF used
 
 # Chroma/vector database
 vector_store/*            # Ignore all generated Chroma vector database files
-!vector_store/.gitkeep    # Keep the .gitkeep file so Git tracks the otherwise empty folder
+!vector_store/.gitkeep    # Keep the .gitkeep file so Git tracks the otherwise empty folder.venv312/
+
+.venv312/
+
+data/vector_store/
+*.bin
+*.pickle
+*.sqlite3
+data/documents/output.md
+data/documents/semantic_chunks.json
+
+data/vector_store/
+*.bin
+*.pickle
+*.sqlite3
+data/documents/output.md
+data/documents/semantic_chunks.json
+*copy*.ipynb
+data/vector_store/
+data/documents/output.md
+data/documents/semantic_chunks.json
+*copy*.ipynb
