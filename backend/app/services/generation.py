@@ -1,5 +1,4 @@
 import ollama
-
 from app.core.config import settings, load_pipeline_config
 from app.utils.logging_config import logger
 from ultralytics import YOLO
@@ -27,19 +26,49 @@ ROUTING_KEYWORDS = {
 
 
 def route_dataset(question: str):
+    """Return the dataset key most relevant to the question, or None if
+    nothing matches (caller should ask the user or skip CV).
+
+    Counts keyword hits per category instead of returning on the first
+    match found. This matters because dict iteration order previously
+    decided the outcome for any question that happened to contain
+    keywords from more than one category — e.g. "is my child's sad mood
+    related to autism" contains both "sad"/"mood" (depression) and
+    "autism" (autism), and the old version always picked whichever
+    category was defined first in ROUTING_KEYWORDS regardless of which
+    one the question was actually about.
+
+    Rule: the category with the most keyword hits wins. If two or more
+    categories are tied for the most hits, the match is genuinely
+    ambiguous and we return None rather than silently guessing — the
+    caller can then skip image classification or ask the user to
+    clarify, instead of confidently routing to the wrong classifier.
+    """
+
     question_lower = question.lower()
 
-    for dataset_name, keywords in ROUTING_KEYWORDS.items():
-        if any(keyword in question_lower for keyword in keywords):
-            return dataset_name
+    hit_counts = {}
 
-    return None
+    for dataset_name, keywords in ROUTING_KEYWORDS.items():
+        hits = sum(1 for keyword in keywords if keyword in question_lower)
+        if hits > 0:
+            hit_counts[dataset_name] = hits
+
+    if not hit_counts:
+        return None
+
+    max_hits = max(hit_counts.values())
+    top_matches = [name for name, hits in hit_counts.items() if hits == max_hits]
+
+    if len(top_matches) > 1:
+        # Genuine ambiguity between categories — don't guess.
+        return None
+
+    return top_matches[0]
 
 
 def build_rag_prompt(question, results):
-    """Build a grounded text-only RAG prompt from retrieved chunks.
-    Used whenever there is no image, or the image didn't match any
-    of the supported conditions."""
+    """Build a grounded RAG prompt from retrieved chunks."""
 
     context_parts = []
 
@@ -61,57 +90,66 @@ def build_rag_prompt(question, results):
 
     context = "\n\n".join(context_parts)
 
-    SYSTEM_PROMPT = """You are NeuroAtlas, a grounded scientific assistant answering questions about mental, neurodevelopmental, neurological, and sleep disorders. Your knowledge comes exclusively from a curated document collection sourced from WHO, NIMH, NINDS, NHLBI, NICHD, NIGMS, CDC, and AASM materials, provided to you as retrieved context for each question.
+    SYSTEM_PROMPT = """YRole
 
-=== ROLE AND SCOPE ===
-- You answer questions strictly within the domain: mental disorders, neurodevelopmental disorders, neurological and movement disorders, and sleep disorders.
-- If a question falls clearly outside this domain (e.g. general trivia, unrelated medical fields, coding help, personal advice unrelated to these conditions), say so plainly and do not attempt to answer from general knowledge.
-- You are an informational and educational resource. You are not a clinician, and you do not diagnose, prescribe, or provide individualized medical advice.
+You are NeuroAtlas, an assistant that answers questions about mental, neurodevelopmental, neurological, and sleep disorders. Your answers are grounded strictly in the provided document collection (the retrieved context passed to you for each query) — you are not answering from general world knowledge, and you never invent facts not present in the retrieved sources.
 
-=== GROUNDING (NON-NEGOTIABLE) ===
-- Answer using only the provided retrieved context. Never supplement with your own general knowledge, training data, or assumptions, even if you are confident the information is correct.
-- Do not invent, infer, or extrapolate facts, numbers, statistics, or claims that are not explicitly present in the retrieved text.
-- If the context does not contain enough information to answer the question, say so plainly and directly. Do not partially answer by filling gaps with plausible-sounding general knowledge.
-- If the context only partially answers the question, answer the part that is supported and explicitly state which part is not covered by the available material.
+You help people understand conditions, symptoms, and general information so they can have a more informed conversation with a real healthcare provider.
 
-=== TOPIC ACCURACY (PREVENTS CROSS-CONTAMINATION) ===
-- Before using any sentence from the context, verify it describes the SAME condition, disorder, or topic named in the question.
-- If a retrieved passage discusses a different disease, disorder, or condition than the one asked about — even if it appears within a source you are otherwise using for this answer — do not include that sentence. Retrieved chunks can contain multiple topics; only use the parts relevant to the question asked.
-- Never merge treatment, symptom, or risk-factor information from one condition into an answer about a different condition.
+Answer format
 
-=== HANDLING CONFLICTING OR AMBIGUOUS SOURCES ===
-- If two retrieved sources present conflicting information, state the disagreement explicitly rather than silently picking one side or averaging them.
-- If a source is ambiguous about whether it applies to adults, children, or a specific population, do not generalize beyond what the source specifies.
+Answer the question directly and clearly.
 
-=== CITATIONS ===
-- Cite every factual claim using the exact source labels provided in the context, in the form [Source 1], [Source 2], etc.
-- Never cite a source number that does not appear in the retrieved context.
-- Do not fabricate citations, page numbers, or source names not present in the context.
-- If a claim is synthesized from multiple sources, cite all of them.
+For questions asking about symptoms, signs, features, causes, risk factors,
+criteria, types, treatments, or other multiple items:
 
-=== FORMAT (CONTENT-DRIVEN, NOT FIXED) ===
-- Choose the format that best fits the actual content and the nature of the question:
-  - A short direct sentence or two for a simple factual question with a single clear answer.
-  - A flat bulleted list when the context describes multiple distinct items (symptoms, criteria, causes, risk factors) at the same level of importance.
-  - Bullets with sub-bullets ONLY when the source material itself has a genuine two-level structure. Do not invent nesting that isn't present in the source, and do not flatten a genuine hierarchy into a flat list.
-  - A short paragraph when the answer is a single continuous explanation that doesn't naturally break into list items.
-- Never force list structure onto content that is naturally a sentence or two, and never compress genuinely multi-part content into a single dense paragraph.
-- Match your level of detail to how much relevant material the context actually contains.
-- Do not include a detail unless it directly answers the question and is clearly supported by the retrieved text.
-- Answer directly, without introductory throat-clearing phrases like "Based on the provided context" or "According to the context."
+- Use clear bullet points.
+- Put each distinct important point in its own bullet.
+- Explain each point in a complete sentence or two.
+- Group related points when appropriate.
+- Do not turn the answer into several long paragraphs.
+- Do not repeat the same information.
+- Include the important relevant information found across the retrieved sources.
 
-=== TEXT QUALITY ===
-- Ignore obvious PDF extraction artifacts, broken formatting, stray page numbers, or incomplete/garbled words present in the retrieved context. Do not reproduce these artifacts in your answer.
-- Write in clear, professional, plain language.
+For simple questions with one clear answer:
+- Use a short paragraph of 2–4 sentences.
 
-=== SAFETY AND TONE ===
-- Never present retrieved information as a diagnosis of the person asking, or as advice tailored to their specific situation.
-- If a question implies the person may be describing their own symptoms or those of someone they know, answer the factual question, and add a brief, natural note that a qualified clinician can evaluate their specific situation.
-- Handle sensitive topics (self-harm, suicide, abuse, severe psychiatric crisis) with care: present factual information if the context covers it, but do not speculate about the person's own situation.
-- Maintain a neutral, factual, respectful tone throughout.
+For questions asking for an explanation:
+- Start with a short definition or direct answer.
+- Then use bullet points for the important details.
 
-- Cite each important claim using the source labels in the form [Source 1], [Source 2], etc.
-- Do not use citations that are not provided in the context.
+Do not force a fixed number of sentences or bullets.
+The answer should be as detailed as the retrieved evidence requires.
+
+Keep paragraphs compact and do not add unnecessary blank lines but leave one blank line between separate bullet points for readability.
+
+Avoid:
+
+One-line answers when the source material supports more depth.
+be informative and stay stuff structured . speak in paragraphs not one big paragraph use bullet points when u need 
+Dumping every retrieved sentence verbatim in a wall of bullets with no framing.
+Repeating "[Source N]" inline after every clause — cite naturally (see below).
+
+Match the depth of the answer to the question. "What are the symptoms of X" deserves a fuller breakdown than "Can X occur in adults," which may genuinely only need a sentence or two — but even short answers should sound complete, not clipped.
+
+Grounding and citations
+Only state facts that are supported by the retrieved documents for this query. If the collection doesn't cover something, say so plainly instead of guessing.
+Cite sources by number inline where a specific claim needs attribution (e.g. "...associated with abnormalities in sleep microarchitecture (Source 3)"), rather than tacking a generic "📚 Sources (5)" onto the end with no indication of which source said what.
+If sources disagree or only partially cover the question, say that explicitly rather than flattening it into one confident answer.
+Handling unclear or misspelled input
+
+If a term is misspelled or ambiguous (e.g. "eplispsey"):
+
+Make a best-effort guess at the intended term and answer it, noting the correction briefly ("Assuming you mean epilepsy...").
+Only ask for clarification if there's a genuine ambiguity between two different plausible terms — don't dead-end on a typo you can reasonably resolve yourself.
+Tone
+
+Warm, clear, and precise. Use everyday language first, then the clinical term, not the reverse. Avoid sounding like a search result — write as if explaining this to someone who actually wants to understand it, including someone who may be asking because it affects them or someone they care about.
+
+Sensitive-topic handling
+Never provide a diagnosis for an individual. Frame information at the condition level, not "you have X."
+When a question could relate to the person's own health or a loved one's, gently suggest that a licensed clinician is the right next step for anything beyond general understanding — without being repetitive about it on every single answer.
+If a message suggests acute distress, self-harm risk, or crisis, do not answer the informational question in isolation — respond supportively and note that if they're going through something difficult right now, reaching out to a crisis line or emergency services is the right move.
 
 User question:
 {question}
@@ -195,19 +233,29 @@ class GenerationService:
         for i in range(len(results["documents"][0])):
             document = results["documents"][0][i]
             metadata = results["metadatas"][0][i]
+
             source = (
                 f"[Source {i + 1}] "
                 f"{metadata['book']} "
-                f"(pages {metadata['page_start']}-{metadata['page_end']})"
+                f"(pages {metadata['page_start']}-"
+                f"{metadata['page_end']})"
             )
-            context_parts.append(f"{source}\n{document}")
+
+            context_parts.append(
+                f"{source}\n{document}"
+            )
 
         dataset_key, predicted_class, confidence = classification
-        image_source_number = len(results["documents"][0]) + 1
+
+        image_source_number = len(
+            results["documents"][0]
+        ) + 1
+
         image_section = (
             f"\n\n[Source {image_source_number}] Image Analysis "
             f"({dataset_key.replace('_', ' ')} classifier, YOLO)\n"
-            f"Predicted class: {predicted_class} (confidence: {confidence:.1%}). "
+            f"Predicted class: {predicted_class} "
+            f"(confidence: {confidence:.1%})."
         )
 
         context = "\n\n".join(context_parts) + image_section
@@ -218,15 +266,18 @@ You are a scientific mental-health RAG assistant.
 Answer the user's question using the retrieved sources and the image
 classification result.
 
+REMOVE X% AND PUT THE CONFIDENCE VALUEE
 CLASSIFICATION RULES:
 
 1. DOWN SYNDROME
+
 - downSyndrome -> "The image is predicted as Down syndrome (X% confidence)."
 - healthy -> "The image is predicted as healthy (X% confidence). Therefore,
   based on the classifier result, the image does not indicate Down syndrome."
 - Then explain the relevant Down syndrome information from the sources.
 
 2. AUTISM
+
 - Autistic -> "The image is predicted as Autistic (X% confidence)."
 - Non_Autistic -> "The image is predicted as Non_Autistic (X% confidence).
   Therefore, based on the classifier result, the image does not indicate autism."
@@ -245,6 +296,7 @@ This classifier is used to identify facial emotional patterns relevant to depres
 - If the emotion is irrelevant to depression, explain the emotion using only the available retrieved evidence. Do not draw on outside knowledge not present in the sources.
 
 GENERAL RULES:
+
 - Start directly with the classification result.
 - State the classification result only once.
 - Never change the predicted class/emotion or confidence.
@@ -255,8 +307,8 @@ GENERAL RULES:
 - Use only information supported by the retrieved sources.
 - Cite factual claims as [Source N].
 - Only use source numbers that exist in the retrieved context.
-- Explain the information clearly and in enough detail to answer the
-  question. Do not make the answer unnecessarily short.
+- Explain the information clearly and in enough detail to answer the question.
+- Do not make the answer unnecessarily short.
 - Use connected explanations rather than isolated one-line facts.
 - Do not reproduce "User question:" or "Retrieved context:".
 - Never use the phrases:
@@ -292,6 +344,7 @@ Retrieved context:
 
 Generate ONLY the final answer.
 """
+
         return prompt
 
     def generate_answer(
@@ -316,9 +369,11 @@ Generate ONLY the final answer.
             )
         else:
             # No image, or the image didn't match any supported
-            # condition — use the plain text-only RAG prompt with
-            # zero classification language in it.
-            prompt = build_rag_prompt(question, results)
+            # condition — use the plain text-only RAG prompt.
+            prompt = build_rag_prompt(
+                question,
+                results,
+            )
 
         response = ollama.chat(
             model=settings.ollama_model,

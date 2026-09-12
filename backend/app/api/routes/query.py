@@ -23,6 +23,8 @@ from app.services.generation import (
     get_generation_service,
 )
 
+from app.utils.image_preprocessing import preprocess_for_classification
+
 
 router = APIRouter()
 
@@ -65,6 +67,7 @@ async def query(
 
     image_path = None
     tmp_path = None
+    processed_path = None
 
     # Save uploaded image temporarily.
     if image is not None:
@@ -83,7 +86,13 @@ async def query(
 
             tmp_path = tmp.name
 
-        image_path = tmp_path
+        # Raw uploads are often EXIF-rotated and framed nothing like the
+        # tightly-cropped headshots the classifiers were trained on.
+        # Normalize orientation and crop to the detected face before the
+        # image ever reaches YOLO (falls back to the full frame if no
+        # face is detected, rather than erroring out).
+        processed_path = preprocess_for_classification(tmp_path)
+        image_path = processed_path
 
     try:
         answer, classification = (
@@ -95,9 +104,16 @@ async def query(
         )
 
     finally:
-        # Delete temporary uploaded image.
+        # Delete temporary uploaded image and, if a separate cropped
+        # file was produced, that too.
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        if (
+            processed_path
+            and processed_path != tmp_path
+            and os.path.exists(processed_path)
+        ):
+            os.unlink(processed_path)
 
     sources = [
         (
