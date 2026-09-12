@@ -1,0 +1,23 @@
+{
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "chunker": {
+    "min_split_tokens": 100,
+    "max_split_tokens": 400,
+    "window_size": 5
+  },
+  "vector_store": {
+    "path": "../data/vector_store",
+    "collection_name": "neurohealth_chunks"
+  },
+  "llm_model": "llama3.2:latest",
+  "ollama_options": {
+    "temperature": 0,
+    "num_ctx": 4096
+  },
+  "total_chunks": 5252,
+  "yolo_models": {
+    "down_syndrome": "models/down_syndrome_best.pt",
+    "autism": "models/autism_best.pt",
+    "depression": "models/depression_best.pt"
+  }
+}
